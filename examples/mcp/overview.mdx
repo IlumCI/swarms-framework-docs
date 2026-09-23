@@ -60,6 +60,14 @@ Start at the top if you are new. The first three need no MCP key at all.
     `mcp_urls=[...]` — one agent, the union of every server's tools, routing handled for you.
     <br />**Model:** `claude-sonnet-5`
   </Card>
+  <Card title="Serve an agent over MCP" icon="rocket" href="/examples/mcp/mcp-deployer-serve-agent">
+    Turn an agent into an MCP server with `MCPDeployer`, behind an API key, and call it from a second agent.
+    <br />**Model:** `claude-sonnet-5`
+  </Card>
+  <Card title="Serve a team from one server" icon="users" href="/examples/mcp/mcp-deployer-serve-team">
+    Two agents, a workflow, and a function as four tools on one `MCPDeployer` server.
+    <br />**Model:** `claude-sonnet-5`
+  </Card>
   <Card title="MCP in a multi-agent workflow" icon="diagram-project" href="/examples/mcp/sequential-workflow">
     One server per agent in a `SequentialWorkflow`, and why splitting beats piling them on.
     <br />**Models:** mixed, one per stage

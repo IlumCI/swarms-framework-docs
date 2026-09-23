@@ -1,0 +1,175 @@
+---
+title: 'Serve a team of agents from one MCP server'
+description: 'Expose two agents, a SequentialWorkflow, and a plain function as four separate MCP tools on one authenticated server.'
+icon: 'users'
+---
+
+One `MCPDeployer` can serve many targets. Pass a dict and every entry becomes its own tool, named by its key. A client then picks the right specialist per call instead of connecting to four servers.
+
+| | |
+|---|---|
+| **Class** | [`MCPDeployer`](/api/mcp-deployer) |
+| **Tools** | `research`, `critique`, `write_briefing`, `word_count` |
+| **Client** | `MCPManager`, no agent needed |
+| **Model used here** | `claude-sonnet-5` |
+
+## Prerequisites
+
+```bash
+pip install -U swarms "mcp>=2.0.0"
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+## Build it
+
+<Steps>
+  <Step title="Define the team">
+    Two agents, a workflow that chains two agents, and a function. Any object with a `run(task)` method can be served, so a swarm is served the same way as a single agent.
+
+    ```python team.py
+    from swarms import Agent, MCPDeployer, SequentialWorkflow
+
+    researcher = Agent(
+        agent_name="Researcher",
+        agent_description="Lists the five most important facts about a topic.",
+        system_prompt="List the five most important facts about the topic.",
+        model_name="claude-sonnet-5",
+        max_loops=1,
+        print_on=False,
+    )
+
+    critic = Agent(
+        agent_name="Critic",
+        agent_description="Names the single weakest point in a piece of text.",
+        system_prompt="Name the single weakest point in the text and explain why.",
+        model_name="claude-sonnet-5",
+        max_loops=1,
+        print_on=False,
+    )
+
+    writer = Agent(
+        agent_name="Writer",
+        system_prompt="Turn the facts into a tight three-paragraph briefing.",
+        model_name="claude-sonnet-5",
+        max_loops=1,
+        print_on=False,
+    )
+
+    briefing = SequentialWorkflow(
+        name="Briefing-Pipeline",
+        description="Researches a topic, then writes a three-paragraph briefing from the facts.",
+        agents=[researcher, writer],
+        max_loops=1,
+    )
+
+
+    def word_count(task: str) -> int:
+        """Count the words in the text."""
+        return len(task.split())
+
+
+    deployer = MCPDeployer(
+        {
+            "research": researcher,
+            "critique": critic,
+            "write_briefing": briefing,
+            "word_count": word_count,
+        },
+        name="Editorial-Team",
+        api_keys=["sk-local-dev"],
+        port=8001,
+        timeout=300,
+    )
+    ```
+
+    Each tool's description comes from the target: `agent_description` for an agent, `description` for the workflow, and the docstring for the function. `timeout=300` fails any single call that runs longer than five minutes.
+  </Step>
+
+  <Step title="Serve it and call each tool">
+    Add a client to the bottom of `team.py`. The `with` block starts the server on a background thread and stops it on exit, so the whole example is one script.
+
+    ```python team.py
+    from swarms.tools.mcp_manager import MCPManager
+
+    if __name__ == "__main__":
+        with deployer:
+            client = MCPManager(mcp_url=deployer.url, api_key="sk-local-dev")
+
+            print(client.list_tool_names())
+
+            count = client.call_tool("word_count", {"task": "the quick brown fox"})
+            print(count["result"])
+
+            brief = client.call_tool(
+                "write_briefing",
+                {"task": "The history of the transistor"},
+            )
+            print(brief["result"])
+    ```
+
+    ```bash
+    python team.py
+    ```
+
+    ```text
+    ['research', 'critique', 'write_briefing', 'word_count']
+    4
+    ```
+
+    followed by the briefing. `word_count` never touches a model, so it answers at once. `write_briefing` runs the researcher and then the writer before it returns.
+  </Step>
+
+  <Step title="Let an agent choose the tool">
+    With the server running, a client agent sees all four tools and decides which to call:
+
+    ```python
+    from swarms import Agent
+    from swarms.schemas.mcp_schemas import MCPConnection
+
+    editor = Agent(
+        agent_name="Editor",
+        system_prompt="Use the team's tools to research, critique, and brief. Return the final briefing.",
+        model_name="claude-sonnet-5",
+        mcp_url=MCPConnection(url="http://127.0.0.1:8001/mcp", api_key="sk-local-dev"),
+        max_loops=3,
+        print_on=False,
+        output_type="final",
+    )
+    ```
+
+    To keep the server up for a separate client process, call `deployer.run()` instead of using the `with` block.
+  </Step>
+</Steps>
+
+## Adding tools later
+
+`add_tool` registers one more target before the server starts. After `start()` it raises `RuntimeError`.
+
+```python
+deployer.add_tool(critic, name="second_opinion", description="A second critique pass.")
+```
+
+Two targets that resolve to the same name raise `ValueError`. That is why several targets are passed as a dict: the keys make every name explicit.
+
+## Checking what is served
+
+`GET /health` lists every tool:
+
+```bash
+curl http://127.0.0.1:8001/health
+```
+
+```json
+{"status":"ok","name":"Editorial-Team","tool":"research","tools":["research","critique","write_briefing","word_count"],"transport":"streamable-http"}
+```
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Serve an agent over MCP" icon="rocket" href="/examples/mcp/mcp-deployer-serve-agent">
+    The single-agent version, with a separate server and client.
+  </Card>
+  <Card title="MCPDeployer reference" icon="book" href="/api/mcp-deployer">
+    Custom auth, token verifiers, SSE and stdio transports.
+  </Card>
+</CardGroup>

@@ -1,0 +1,162 @@
+---
+title: 'Serve an agent over MCP'
+description: 'Put one agent behind an API key with MCPDeployer and call it from a second agent, in two short scripts.'
+icon: 'rocket'
+---
+
+Every other page in this section points an agent **at** an MCP server. This one makes an agent **into** one. Once it is served, any MCP client can call it as a tool: another Swarms agent, Claude Desktop, Cursor, or a script in another language.
+
+| | |
+|---|---|
+| **Class** | [`MCPDeployer`](/api/mcp-deployer) |
+| **Transport** | streamable HTTP, `http://127.0.0.1:8000/mcp` |
+| **Auth** | one static API key |
+| **Model used here** | `claude-sonnet-5` |
+
+## Prerequisites
+
+```bash
+pip install -U swarms "mcp>=2.0.0"
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
+
+`MCPDeployer` needs `mcp` 2.0.0 or newer.
+
+## Build it
+
+<Steps>
+  <Step title="Write the server">
+    The agent you want to share is an ordinary `Agent`. `agent_description` becomes the tool description the calling model reads, so write it for a reader with no other context.
+
+    ```python server.py
+    from swarms import Agent, MCPDeployer
+
+    analyst = Agent(
+        agent_name="Market-Analyst",
+        agent_description="Answers questions about markets and companies in three sentences or fewer.",
+        system_prompt="You are a concise market analyst. Answer in three sentences or fewer.",
+        model_name="claude-sonnet-5",
+        max_loops=1,
+        print_on=False,
+    )
+
+    if __name__ == "__main__":
+        MCPDeployer(
+            analyst,
+            api_keys=["sk-local-dev"],
+            port=8000,
+        ).run()
+    ```
+
+    The tool is named after the agent: `Market-Analyst` becomes `market_analyst`.
+  </Step>
+
+  <Step title="Run it">
+    ```bash
+    python server.py
+    ```
+
+    It prints a banner with the URL and keeps serving. Leave it running.
+  </Step>
+
+  <Step title="Check it from a second terminal">
+    `/health` is public:
+
+    ```bash
+    curl http://127.0.0.1:8000/health
+    ```
+
+    ```json
+    {"status":"ok","name":"market_analyst","tool":"market_analyst","tools":["market_analyst"],"transport":"streamable-http"}
+    ```
+
+    The MCP endpoint is not. A request with no key, or the wrong one, gets `401`:
+
+    ```bash
+    curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8000/mcp
+    curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "x-api-key: wrong" http://127.0.0.1:8000/mcp
+    ```
+
+    ```text
+    401
+    401
+    ```
+  </Step>
+
+  <Step title="Call it from another agent">
+    The client is an ordinary agent too. `MCPConnection` carries the URL and the key.
+
+    ```python client.py
+    from swarms import Agent
+    from swarms.schemas.mcp_schemas import MCPConnection
+
+    manager = Agent(
+        agent_name="Portfolio-Manager",
+        system_prompt=(
+            "You manage a portfolio. Use the market_analyst tool for any "
+            "market question, then summarise its answer in one sentence."
+        ),
+        model_name="claude-sonnet-5",
+        mcp_url=MCPConnection(
+            url="http://127.0.0.1:8000/mcp",
+            api_key="sk-local-dev",
+        ),
+        max_loops=2,
+        print_on=False,
+        output_type="final",
+    )
+
+    print(manager.run("What is the main risk to semiconductor stocks right now?"))
+    ```
+
+    ```bash
+    python client.py
+    ```
+
+    The portfolio manager discovers `market_analyst`, calls it with the question as `task`, and summarises what the analyst returned. The server terminal logs each request.
+  </Step>
+</Steps>
+
+## What just happened
+
+1. `MCPDeployer` wrapped `analyst` as one MCP tool with the schema `task: str`, `img: str | None`.
+2. Every request to `/mcp` went through the auth layer first. The key can arrive as `x-api-key` or as `Authorization: Bearer`, which is what `MCPConnection` sends.
+3. The tool call ran `analyst.run(task)` on a worker thread and returned its answer as the tool result.
+
+## Variations
+
+**Keys from the environment instead of the code.** `api_key_env` reads a comma-separated list, so you can rotate keys without a code change:
+
+```python
+MCPDeployer(analyst, api_key_env="ANALYST_MCP_KEYS", port=8000).run()
+```
+
+**Run the server inside your own script.** `start()` and `stop()`, or a `with` block, run it on a background thread:
+
+```python
+with MCPDeployer(analyst, api_keys=["sk-local-dev"], port=8000) as server:
+    print(server.url)
+```
+
+**Reachable from other machines.** Bind to all interfaces and put TLS in front of it:
+
+```python
+MCPDeployer(analyst, api_keys=["sk-prod-..."], host="0.0.0.0", port=8000).run()
+```
+
+**Launched by an MCP host.** Claude Desktop and similar hosts start servers as subprocesses over stdio. There are no HTTP headers on stdio, so the host itself is the security boundary:
+
+```python
+MCPDeployer(analyst, transport="stdio", allow_anonymous=True).run()
+```
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Serve a team from one server" icon="users" href="/examples/mcp/mcp-deployer-serve-team">
+    Several agents, a workflow, and a function, each its own tool.
+  </Card>
+  <Card title="MCPDeployer reference" icon="book" href="/api/mcp-deployer">
+    Every parameter, auth mode, and method.
+  </Card>
+</CardGroup>

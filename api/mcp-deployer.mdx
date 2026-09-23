@@ -1,0 +1,403 @@
+---
+title: 'MCPDeployer'
+description: 'Serve any agent, swarm, or function as an authenticated MCP server that other agents and MCP hosts can call'
+icon: 'server'
+---
+
+## Overview
+
+`MCPDeployer` is the server side of MCP in Swarms. [`MCPManager`](/api/mcp-manager) connects an agent **to** an MCP server; `MCPDeployer` turns an agent **into** one.
+
+Give it one target or several. A target is an `Agent`, any swarm with a `run()` method (`SequentialWorkflow`, `SwarmRouter`, `HierarchicalSwarm`, ...), or a plain Python callable. Each target becomes one MCP tool. Every HTTP request passes through an auth layer before it reaches the MCP transport, and a server with no auth configured refuses to build.
+
+```python
+from swarms import Agent, MCPDeployer
+
+analyst = Agent(
+    agent_name="Market-Analyst",
+    agent_description="Answers questions about markets and companies.",
+    model_name="claude-sonnet-5",
+    max_loops=1,
+)
+
+MCPDeployer(analyst, api_keys=["sk-local-dev"], port=8000).run()
+```
+
+Another agent then uses it like any other MCP server:
+
+```python
+from swarms import Agent
+from swarms.schemas.mcp_schemas import MCPConnection
+
+client = Agent(
+    agent_name="Portfolio-Manager",
+    model_name="claude-sonnet-5",
+    mcp_url=MCPConnection(url="http://127.0.0.1:8000/mcp", api_key="sk-local-dev"),
+    max_loops=2,
+)
+```
+
+<Note>
+`MCPDeployer` ships in `swarms` 15.0.3 and needs `mcp>=2.0.0`. It builds on `mcp.server.mcpserver.MCPServer`, which the 1.x releases of `mcp` do not have.
+
+```bash
+pip install -U swarms "mcp>=2.0.0"
+```
+</Note>
+
+## Import
+
+```python
+from swarms import MCPDeployer, deploy_as_mcp
+```
+
+## How a target becomes a tool
+
+| | |
+|---|---|
+| **Tool name** | The dict key if you passed a dict, otherwise a snake_case form of the target's `agent_name`, `name`, or `__name__`. `Market-Analyst` becomes `market_analyst`. |
+| **Tool description** | The target's `agent_description`, then `description`, then the first line of its docstring. |
+| **Input schema** | Always `task: str` (required) and `img: str \| None` (optional). |
+| **How it is called** | `target.run(task, img=img)` when `img` is sent and `run` accepts it, otherwise `target.run(task)`. A plain callable is called as `target(task)`. |
+| **Result** | A string is returned as is. `None` becomes `""`. Anything else is serialized with `json.dumps(..., indent=2)`, falling back to `str()`. |
+
+The call runs on a worker thread, so a blocking agent does not stall the server. Set `timeout` to cap how long one call may take.
+
+## Constructor
+
+```python
+MCPDeployer(
+    targets,
+    name=None,
+    description=None,
+    tool_name=None,
+    host="127.0.0.1",
+    port=8000,
+    transport="streamable-http",
+    path=None,
+    api_keys=None,
+    api_key_env=None,
+    api_key_header="x-api-key",
+    auth=None,
+    token_verifier=None,
+    required_scopes=None,
+    allow_anonymous=False,
+    public_paths=None,
+    extra_tools=None,
+    timeout=None,
+    json_response=False,
+    stateless_http=True,
+    verbose=False,
+    show_banner=True,
+)
+```
+
+### Targets and naming
+
+<ParamField path="targets" type="Any | List[Any] | Dict[str, Any]" required>
+  What to serve. One target, a list of targets, or a dict of tool name to target. A target is an `Agent`, any object with a `run(task, ...)` method, or a callable taking the task string. Each becomes one tool.
+</ParamField>
+
+<ParamField path="name" type="Optional[str]" default="None">
+  Server name advertised to MCP clients. Defaults to the first tool's name.
+</ParamField>
+
+<ParamField path="tool_name" type="Optional[str]" default="None">
+  Tool name for a **single** target. With several targets, pass a dict instead. Passing it with a list or dict raises `ValueError`.
+</ParamField>
+
+<ParamField path="description" type="Optional[str]" default="None">
+  Tool description for a **single** target. Same restriction as `tool_name`.
+</ParamField>
+
+<ParamField path="extra_tools" type="Optional[Iterable[Callable]]" default="None">
+  More plain functions to expose beside the targets. Each function's signature becomes its schema and its docstring its description, so give every one a docstring.
+</ParamField>
+
+### Transport
+
+<ParamField path="host" type="str" default="127.0.0.1">
+  Bind address. Binding anywhere other than `127.0.0.1` or `localhost` turns off the `mcp` package's DNS-rebinding guard, which would otherwise reject every request whose `Host` header is not localhost.
+</ParamField>
+
+<ParamField path="port" type="int" default="8000">
+  Bind port.
+</ParamField>
+
+<ParamField path="transport" type="str" default="streamable-http">
+  `"streamable-http"`, `"sse"`, or `"stdio"`. Anything else raises `ValueError`. Auth applies to the two HTTP transports only.
+</ParamField>
+
+<ParamField path="path" type="Optional[str]" default="None">
+  URL path of the MCP endpoint. Defaults to `/mcp`, or `/sse` for the SSE transport.
+</ParamField>
+
+<ParamField path="json_response" type="bool" default="False">
+  Streamable HTTP only. Reply with plain JSON instead of an event stream.
+</ParamField>
+
+<ParamField path="stateless_http" type="bool" default="True">
+  Streamable HTTP only. Keep no per-session state, which is what you want behind a load balancer.
+</ParamField>
+
+<ParamField path="timeout" type="Optional[float]" default="None">
+  Seconds one tool call may run before it fails. `None` means no limit.
+</ParamField>
+
+### Auth
+
+<ParamField path="api_keys" type="Optional[Iterable[str]]" default="None">
+  Static keys. Compared in constant time. Blank entries are dropped and duplicates removed.
+</ParamField>
+
+<ParamField path="api_key_env" type="Optional[str]" default="None">
+  Name of an environment variable holding more keys, comma-separated. Read once, at construction.
+</ParamField>
+
+<ParamField path="api_key_header" type="str" default="x-api-key">
+  Header a client may send a raw key in. A `Bearer ` prefix in it is stripped. `Authorization: Bearer <key>` is always accepted as well.
+</ParamField>
+
+<ParamField path="auth" type="Callable[[Optional[str], Headers], bool | dict | None]" default="None">
+  Your own check, sync or async. It receives the credential (or `None`) and the request headers. A truthy return admits the request; a `dict` return is also kept as the request's claims, with `sub`/`subject` and `scopes` read from it. A falsy return or an exception refuses the request. Takes precedence over every other auth setting.
+</ParamField>
+
+<ParamField path="token_verifier" type="Optional[TokenVerifier]" default="None">
+  An `mcp.server.auth.provider.TokenVerifier`. Used when `auth` is not set. A token that fails verification, has expired, or lacks any of `required_scopes` is refused.
+</ParamField>
+
+<ParamField path="required_scopes" type="Optional[Iterable[str]]" default="None">
+  Scopes a verified token must carry.
+</ParamField>
+
+<ParamField path="allow_anonymous" type="bool" default="False">
+  Serve with no auth at all. Off by default: with no `api_keys`, `api_key_env` keys, `auth`, or `token_verifier`, the constructor raises `ValueError`.
+</ParamField>
+
+<ParamField path="public_paths" type="Optional[Iterable[str]]" default="('/health',)">
+  Paths that skip auth.
+</ParamField>
+
+### Output
+
+<ParamField path="verbose" type="bool" default="False">
+  Log every admitted tool call.
+</ParamField>
+
+<ParamField path="show_banner" type="bool" default="True">
+  Print the startup banner from `run()` and `start()`.
+</ParamField>
+
+## Auth, in order of precedence
+
+`authenticate()` checks these in order and stops at the first that applies:
+
+1. `allow_anonymous=True` admits everything.
+2. `auth` decides alone. The static keys and token verifier are not consulted.
+3. No credential in either header: refused.
+4. `token_verifier` verifies the token, its expiry, and `required_scopes`.
+5. The credential is compared against the static keys.
+
+A refused request gets:
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer
+
+{"error": "unauthorized"}
+```
+
+The client can send its key either way:
+
+```bash
+curl -H "x-api-key: sk-local-dev" ...
+curl -H "Authorization: Bearer sk-local-dev" ...
+```
+
+`MCPConnection(api_key=...)` and `MCPManager(api_key=...)` handle this for you.
+
+### Custom auth
+
+```python
+from swarms import Agent, MCPDeployer
+
+TENANTS = {"acme": "sk-acme", "globex": "sk-globex"}
+
+
+async def check(credential, headers):
+    tenant = headers.get("x-tenant")
+    if not credential or TENANTS.get(tenant) != credential:
+        return False
+    return {"sub": tenant, "scopes": ["run"]}
+
+
+agent = Agent(agent_name="Support", model_name="claude-sonnet-5", max_loops=1)
+
+MCPDeployer(agent, auth=check).run()
+```
+
+## Methods
+
+### run
+
+```python
+deployer.run(log_level="info")
+```
+
+Serve until interrupted. Blocks. For the HTTP transports this runs `uvicorn`; for `stdio` it hands stdin/stdout to the MCP server and logs a warning that auth settings are ignored, since stdio carries no headers.
+
+### start
+
+```python
+deployer.start(wait=10.0)
+```
+
+Serve on a background daemon thread and return once the socket is accepting connections. Returns the deployer. Raises `RuntimeError` if the server has not started within `wait` seconds, and `ValueError` for the `stdio` transport. Calling it again while running is a no-op.
+
+### stop
+
+```python
+deployer.stop(wait=10.0)
+```
+
+Stop a server started with `start()`, waiting up to `wait` seconds for the thread to finish.
+
+<Warning>
+A deployer serves once. On the streamable HTTP transport, calling `start()` again after `stop()` fails with `RuntimeError: MCPDeployer did not start`, because the underlying `mcp` session manager can only run once per instance. Build a new `MCPDeployer` to serve again.
+</Warning>
+
+### Context manager
+
+`with MCPDeployer(...) as deployer:` calls `start()` on entry and `stop()` on exit. This is the easiest way to run a server and a client in one script or test.
+
+```python
+from swarms import MCPDeployer
+from swarms.tools.mcp_manager import MCPManager
+
+
+def word_count(task: str) -> int:
+    """Count the words in the text."""
+    return len(task.split())
+
+
+with MCPDeployer(word_count, api_keys=["sk-local-dev"], port=8000) as deployer:
+    client = MCPManager(mcp_url=deployer.url, api_key="sk-local-dev")
+    print(client.list_tool_names())
+    print(client.call_tool("word_count", {"task": "the quick brown fox"})["result"])
+```
+
+```text
+['word_count']
+4
+```
+
+### add_tool
+
+```python
+deployer.add_tool(target, name=None, description=None)
+```
+
+Register one more target as a tool. Call it before `run()` or `start()`; after `start()` it raises `RuntimeError`. A name that is already registered raises `ValueError`. Returns the `ServedTool`.
+
+### authenticate
+
+```python
+result = await deployer.authenticate(headers)
+```
+
+The check the auth layer runs on every request. Returns an `AuthResult` when the request is admitted and `None` when it is refused. Useful for testing an auth setup without starting a server.
+
+### build_app
+
+```python
+app = deployer.build_app()
+```
+
+The ASGI app: the MCP transport wrapped in the auth layer. Mount it in your own ASGI server when `run()` and `start()` are not what you need. The `app` property builds it once and caches it. Raises `ValueError` for `stdio`.
+
+### print_banner
+
+Print the startup banner. `run()` and `start()` call it unless `show_banner=False`.
+
+## Properties
+
+<ResponseField name="url" type="str">
+  `http://{host}:{port}{path}`, the address to give a client.
+</ResponseField>
+
+<ResponseField name="tool_names" type="List[str]">
+  Every registered tool name, in registration order.
+</ResponseField>
+
+<ResponseField name="tools" type="Dict[str, ServedTool]">
+  Tool name to `ServedTool` (`name`, `target`, `description`, `target_type`).
+</ResponseField>
+
+<ResponseField name="tool_name" type="str">
+  The first registered tool's name.
+</ResponseField>
+
+<ResponseField name="target" type="Any">
+  The first registered target.
+</ResponseField>
+
+<ResponseField name="description" type="str">
+  The first registered tool's description.
+</ResponseField>
+
+<ResponseField name="api_keys" type="List[str]">
+  The resolved static keys, from `api_keys` and `api_key_env` together.
+</ResponseField>
+
+## Health check
+
+`GET /health` is always public and returns:
+
+```json
+{
+  "status": "ok",
+  "name": "market_analyst",
+  "tool": "market_analyst",
+  "tools": ["market_analyst"],
+  "transport": "streamable-http"
+}
+```
+
+## deploy_as_mcp
+
+```python
+from swarms import deploy_as_mcp
+
+deploy_as_mcp(analyst, api_keys=["sk-local-dev"], port=8000)
+```
+
+Builds an `MCPDeployer` with the same keyword arguments and calls `run()`. Blocks.
+
+## Errors
+
+| Raised | When |
+|---|---|
+| `ValueError("MCPDeployer needs a target to serve.")` | `targets` is `None` |
+| `ValueError` | `transport` is not `streamable-http`, `sse`, or `stdio` |
+| `ValueError("No auth configured. ...")` | No keys, `auth`, or `token_verifier`, and `allow_anonymous` is `False` |
+| `ValueError` | A target is neither callable nor has a `run()` method |
+| `ValueError` | Two targets resolve to the same tool name. Pass a dict to name them |
+| `ValueError` | `tool_name` or `description` passed with a list or dict |
+| `RuntimeError` | `add_tool()` after `start()`, or the server did not start within `wait` |
+
+## Examples
+
+<CardGroup cols={2}>
+  <Card title="Serve an agent over MCP" icon="rocket" href="/examples/mcp/mcp-deployer-serve-agent">
+    One agent behind an API key, called by a second agent.
+  </Card>
+  <Card title="Serve a team from one server" icon="users" href="/examples/mcp/mcp-deployer-serve-team">
+    Several agents, a workflow, and a function as separate tools.
+  </Card>
+</CardGroup>
+
+The framework repository has more, covering every auth mode and transport: [`examples/mcp/mcp_deployer/`](https://github.com/kyegomez/swarms/tree/master/examples/mcp/mcp_deployer).
+
+## Source
+
+[`swarms/structs/mcp_deployer.py`](https://github.com/kyegomez/swarms/blob/master/swarms/structs/mcp_deployer.py)

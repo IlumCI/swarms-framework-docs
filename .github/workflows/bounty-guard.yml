@@ -1,0 +1,121 @@
+name: Bounty guard
+
+# Closes PRs/issues and deletes comments that mention "bounty".
+# Security notes:
+#  - Uses pull_request_target so the token can write on fork PRs, and therefore
+#    NEVER checks out or executes PR code.
+#  - Untrusted text (titles, bodies) is only passed through env vars, never
+#    interpolated into shell, to prevent script injection.
+#  - Permissions are limited to what is needed.
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+  issues:
+    types: [opened, edited, reopened]
+  issue_comment:
+    types: [created, edited]
+  pull_request_review:
+    types: [submitted, edited]
+  pull_request_review_comment:
+    types: [created, edited]
+  workflow_dispatch:   # manual sweep of everything already open
+
+permissions: {}
+
+concurrency:
+  group: bounty-guard-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}-${{ github.event_name }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Bounty guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      EVENT: ${{ github.event_name }}
+      PATTERN: 'bount(y|ies)'
+      # Untrusted inputs: only ever read as env vars.
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_TITLE: ${{ github.event.pull_request.title }}
+      PR_BODY: ${{ github.event.pull_request.body }}
+      PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+      PR_ASSOC: ${{ github.event.pull_request.author_association }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      ISSUE_TITLE: ${{ github.event.issue.title }}
+      ISSUE_BODY: ${{ github.event.issue.body }}
+      ISSUE_ASSOC: ${{ github.event.issue.author_association }}
+      ISSUE_IS_PR: ${{ github.event.issue.pull_request != null }}
+      COMMENT_ID: ${{ github.event.comment.id }}
+      COMMENT_BODY: ${{ github.event.comment.body }}
+      COMMENT_ASSOC: ${{ github.event.comment.author_association }}
+      REVIEW_ID: ${{ github.event.review.id }}
+      REVIEW_BODY: ${{ github.event.review.body }}
+      REVIEW_ASSOC: ${{ github.event.review.author_association }}
+    steps:
+      - name: Detect and enforce
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          hit() { printf '%s' "$1" | grep -Eiq "$PATTERN"; }
+          trusted() { [[ "$1" == "OWNER" || "$1" == "MEMBER" || "$1" == "COLLABORATOR" ]]; }
+
+          close_pr()    { gh pr close "$1" || true; gh pr edit "$1" --add-label "blocked" 2>/dev/null || true; }
+          close_issue() { gh issue close "$1" --reason "not planned" || true; }
+
+          failed=0
+
+          case "$EVENT" in
+            pull_request_target)
+              if ! trusted "$PR_ASSOC" && hit "$PR_TITLE $PR_BODY $PR_BRANCH"; then
+                echo "::error::Blocked: 'bounty' found in PR #$PR_NUMBER"
+                close_pr "$PR_NUMBER"; failed=1
+              fi ;;
+            issues)
+              if ! trusted "$ISSUE_ASSOC" && hit "$ISSUE_TITLE $ISSUE_BODY"; then
+                echo "::error::Blocked: 'bounty' found in issue #$ISSUE_NUMBER"
+                close_issue "$ISSUE_NUMBER"; failed=1
+              fi ;;
+            issue_comment)
+              if ! trusted "$COMMENT_ASSOC" && hit "$COMMENT_BODY"; then
+                echo "::error::Deleting comment $COMMENT_ID"
+                gh api -X DELETE "repos/$GH_REPO/issues/comments/$COMMENT_ID" || true
+                failed=1
+              fi ;;
+            pull_request_review_comment)
+              if ! trusted "$COMMENT_ASSOC" && hit "$COMMENT_BODY"; then
+                echo "::error::Deleting review comment $COMMENT_ID"
+                gh api -X DELETE "repos/$GH_REPO/pulls/comments/$COMMENT_ID" || true
+                failed=1
+              fi ;;
+            pull_request_review)
+              if ! trusted "$REVIEW_ASSOC" && hit "$REVIEW_BODY"; then
+                echo "::error::Bounty in review on #$PR_NUMBER; closing PR"
+                close_pr "$PR_NUMBER"; failed=1
+              fi ;;
+            workflow_dispatch)
+              # Sweep: close every open PR/issue from non-trusted authors that mentions bounty.
+              gh pr list --state open --limit 500 \
+                --json number,title,body,headRefName,authorAssociation \
+                | jq -c '.[]' | while read -r pr; do
+                  assoc=$(jq -r .authorAssociation <<<"$pr")
+                  text=$(jq -r '[.title,.body,.headRefName]|map(.//"")|join(" ")' <<<"$pr")
+                  if ! trusted "$assoc" && hit "$text"; then close_pr "$(jq -r .number <<<"$pr")"; fi
+                done
+              gh issue list --state open --limit 500 \
+                --json number,title,body,authorAssociation \
+                | jq -c '.[]' | while read -r is; do
+                  assoc=$(jq -r .authorAssociation <<<"$is")
+                  text=$(jq -r '[.title,.body]|map(.//"")|join(" ")' <<<"$is")
+                  if ! trusted "$assoc" && hit "$text"; then close_issue "$(jq -r .number <<<"$is")"; fi
+                done ;;
+          esac
+
+          # Failing the job makes this a failing required check, blocking merge.
+          exit "$failed"

@@ -39,7 +39,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       EVENT: ${{ github.event_name }}
-      PATTERN: 'bount(y|ies)'
+      PATTERN: 'bount(y|ies|ied)|payouts?|rewards?|prizes?'
       # Untrusted inputs: only ever read as env vars.
       PR_NUMBER: ${{ github.event.pull_request.number }}
       PR_TITLE: ${{ github.event.pull_request.title }}
